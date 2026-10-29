@@ -54,6 +54,21 @@ class MainActivity : AppCompatActivity() {
         tvStatus = findViewById(R.id.tvStatus)
         tvHeard = findViewById(R.id.tvHeard)
 
+        findViewById<Button>(R.id.btnTalk).setOnClickListener {
+            if (serviceRunning) {
+                val talk = Intent(this, VoiceService::class.java).apply {
+                    action = VoiceService.ACTION_TALK
+                }
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    startForegroundService(talk)
+                } else {
+                    startService(talk)
+                }
+            } else {
+                tvStatus.text = "Pehle Start Listening dabao"
+            }
+        }
+
         btnToggle.setOnClickListener {
             if (serviceRunning) {
                 stopVoiceService()

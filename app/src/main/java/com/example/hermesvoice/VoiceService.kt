@@ -53,6 +53,7 @@ class VoiceService : Service() {
 
     @Volatile private var listening = false
     @Volatile private var active = false
+    @Volatile private var talkRequested = false
 
     override fun onCreate() {
         super.onCreate()
@@ -81,6 +82,16 @@ class VoiceService : Service() {
             stopListening()
             stopForeground(STOP_FOREGROUND_REMOVE)
             stopSelf()
+        } else if (intent?.action == ACTION_TALK) {
+            // Tap to Talk: skip the wake word
+            isRunning = true
+            if (listening) {
+                talkRequested = true
+                listening = false
+            } else if (!active) {
+                active = true
+                main.post { onWakeWord() }
+            }
         } else {
             isRunning = true
             startWakeWord()
@@ -169,10 +180,11 @@ class VoiceService : Service() {
         var recognizer: Recognizer? = null
         var detected = false
         var stopRequested = false
+        talkRequested = false
         try {
             status = "Model load ho raha hai (pehli baar 10-20 sec)..."
             val m = loadModel()
-            recognizer = Recognizer(m, SAMPLE_RATE.toFloat())
+            recognizer = Recognizer(m, SAMPLE_RATE.toFloat(), GRAMMAR)
 
             val minBuffer = AudioRecord.getMinBufferSize(
                 SAMPLE_RATE,
@@ -202,7 +214,7 @@ class VoiceService : Service() {
                 val text = json.optString("text", json.optString("partial", ""))
                 if (text.isNotBlank() && text != lastText) {
                     lastText = text
-                    status = "Suna: $text"
+                    status = "Suna: $text   (wake: jarvis / computer / hermes)"
                 }
                 if (text.split(" ").contains("stop")) {
                     stopRequested = true
@@ -236,7 +248,8 @@ class VoiceService : Service() {
                 stopForeground(STOP_FOREGROUND_REMOVE)
                 stopSelf()
             }
-        } else if (detected) {
+        } else if (detected || talkRequested) {
+            talkRequested = false
             main.post { onWakeWord() }
         }
     }
@@ -388,6 +401,9 @@ class VoiceService : Service() {
     companion object {
         const val ACTION_START = "com.example.hermesvoice.ACTION_START"
         const val ACTION_STOP = "com.example.hermesvoice.ACTION_STOP"
+        const val ACTION_TALK = "com.example.hermesvoice.ACTION_TALK"
+        // Vosk only listens for these words; everything else becomes [unk]
+        const val GRAMMAR = "[\"jarvis\", \"computer\", \"hermes\", \"stop\", \"[unk]\"]"
         const val CHANNEL_ID = "hermes-voice-channel"
         const val NOTIF_ID = 1
         const val TAG = "HermesVoice"

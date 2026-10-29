@@ -43,7 +43,7 @@ jobs:
       - name: Build debug APK
         run: gradle assembleDebug --stacktrace
         env:
-          HERMES_TOKEN: ${{ secrets.HERMES_TOKEN || 'CHANGE_ME' }}
+          HERMES_TOKEN: ${{ secrets.HERMES_KEY || secrets.HERMES_TOKEN || 'CHANGE_ME' }}
 
       - uses: actions/upload-artifact@v4
         with:
