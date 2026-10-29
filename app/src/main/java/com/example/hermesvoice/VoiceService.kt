@@ -141,9 +141,26 @@ class VoiceService : Service() {
 
     private fun isWakeWord(text: String): Boolean {
         if (text.isBlank()) return false
-        val normalized = text.lowercase().trim()
-        if (normalized.contains("her mes") || normalized.contains("her mis")) return true
-        return normalized.split(" ").any { it in WAKE_WORDS }
+        val tokens = text.lowercase().trim().split(" ").filter { it.isNotEmpty() }
+        // single words plus adjacent pairs joined ("her mess" -> "hermess")
+        val candidates = tokens + tokens.zipWithNext { a, b -> a + b }
+        return candidates.any { word ->
+            word in WAKE_WORDS || (word.length >= 5 && editDistance(word, "hermes") <= 2)
+        }
+    }
+
+    private fun editDistance(a: String, b: String): Int {
+        var prev = IntArray(b.length + 1) { it }
+        for (i in 1..a.length) {
+            val cur = IntArray(b.length + 1)
+            cur[0] = i
+            for (j in 1..b.length) {
+                val cost = if (a[i - 1] == b[j - 1]) 0 else 1
+                cur[j] = minOf(cur[j - 1] + 1, prev[j] + 1, prev[j - 1] + cost)
+            }
+            prev = cur
+        }
+        return prev[b.length]
     }
 
     private fun runWakeLoop() {
@@ -151,6 +168,7 @@ class VoiceService : Service() {
         var recognizer: Recognizer? = null
         var detected = false
         try {
+            status = "Model load ho raha hai (pehli baar 10-20 sec)..."
             val m = loadModel()
             recognizer = Recognizer(m, SAMPLE_RATE.toFloat())
 
@@ -169,8 +187,10 @@ class VoiceService : Service() {
             )
             audio.startRecording()
             listening = true
+            status = "Sun raha hoon... \"Hermes\" bolo"
 
             val buffer = ByteArray(bufferSize)
+            var lastText = ""
             while (listening) {
                 val read = audio.read(buffer, 0, buffer.size)
                 if (read < 0) break
@@ -178,6 +198,10 @@ class VoiceService : Service() {
                 val isFinal = recognizer.acceptWaveForm(buffer, read)
                 val json = JSONObject(if (isFinal) recognizer.result else recognizer.partialResult)
                 val text = json.optString("text", json.optString("partial", ""))
+                if (text.isNotBlank() && text != lastText) {
+                    lastText = text
+                    status = "Suna: $text"
+                }
                 if (isWakeWord(text)) {
                     detected = true
                     break
@@ -185,6 +209,7 @@ class VoiceService : Service() {
             }
         } catch (e: Exception) {
             Log.e(TAG, "Wake word loop failed", e)
+            status = "Error: " + (e.message ?: e.javaClass.simpleName)
             active = false
             main.post { tts?.speak("Wake word shuru nahi hua. Model check karo.") }
         } finally {
@@ -206,6 +231,7 @@ class VoiceService : Service() {
     // ---------- listen to the request ----------
 
     private fun onWakeWord() {
+        status = "Hermes suna! Ab apni baat bolo"
         tts?.speak("haan bolo") { startSpeechRecognition() }
     }
 
@@ -255,6 +281,7 @@ class VoiceService : Service() {
     // ---------- talk to Hermes (Termux bridge) ----------
 
     private fun askHermes(message: String) {
+        status = "Hermes ko bheja: $message"
         executor.execute {
             var answer = ""
             try {
@@ -277,6 +304,7 @@ class VoiceService : Service() {
                 answer = "Bridge se connect nahi hua. Termux me bridge chalu karo."
             }
             if (answer.isBlank()) answer = "Mujhe jawab nahi mila."
+            status = "Jawab: $answer"
             main.post { tts?.speak(answer) { resumeWake() } }
         }
     }
@@ -350,5 +378,9 @@ class VoiceService : Service() {
         @Volatile
         var isRunning = false
             private set
+
+        // Shown on the main screen so you can see what the app is doing
+        @Volatile
+        var status: String = "Stopped"
     }
 }

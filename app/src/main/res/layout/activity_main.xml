@@ -38,4 +38,13 @@
         android:textSize="14sp"
         android:textColor="?android:attr/textColorSecondary" />
 
+    <TextView
+        android:id="@+id/tvHeard"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text=""
+        android:layout_marginTop="24dp"
+        android:gravity="center"
+        android:textSize="16sp" />
+
 </LinearLayout>

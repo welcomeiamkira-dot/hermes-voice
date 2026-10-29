@@ -8,6 +8,8 @@ import android.content.ServiceConnection
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.widget.Button
 import android.widget.TextView
 import androidx.activity.result.contract.ActivityResultContracts
@@ -19,6 +21,14 @@ class MainActivity : AppCompatActivity() {
     private var serviceRunning = false
     private lateinit var btnToggle: Button
     private lateinit var tvStatus: TextView
+    private lateinit var tvHeard: TextView
+    private val handler = Handler(Looper.getMainLooper())
+    private val poll = object : Runnable {
+        override fun run() {
+            tvHeard.text = if (VoiceService.isRunning) VoiceService.status else ""
+            handler.postDelayed(this, 500)
+        }
+    }
 
     private val permissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
@@ -37,6 +47,7 @@ class MainActivity : AppCompatActivity() {
 
         btnToggle = findViewById(R.id.btnToggleService)
         tvStatus = findViewById(R.id.tvStatus)
+        tvHeard = findViewById(R.id.tvHeard)
 
         btnToggle.setOnClickListener {
             if (serviceRunning) {
@@ -51,6 +62,12 @@ class MainActivity : AppCompatActivity() {
         super.onResume()
         serviceRunning = VoiceService.isRunning
         updateUi()
+        handler.post(poll)
+    }
+
+    override fun onPause() {
+        super.onPause()
+        handler.removeCallbacks(poll)
     }
 
     private fun ensurePermissionsAndStart() {
