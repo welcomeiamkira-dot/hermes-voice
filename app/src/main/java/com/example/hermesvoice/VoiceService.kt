@@ -199,7 +199,11 @@ class VoiceService : Service() {
         }
     }
 
+    private var stopped = false
+
     private fun stopListening() {
+        if (stopped) return
+        stopped = true
         isRunning = false
         listening = false
         recording?.stop()
@@ -210,7 +214,11 @@ class VoiceService : Service() {
         speechRecognizer?.cancel()
         speechRecognizer?.destroy()
         speechRecognizer = null
-        executor.shutdownNow()
+        try {
+            executor.shutdownNow()
+        } catch (e: Exception) {
+            // ignore
+        }
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
     }
