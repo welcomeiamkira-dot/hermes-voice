@@ -10,23 +10,20 @@ Android foreground service that listens for the wake word **"hermes"** offline u
 - Auto-starts after boot
 
 ## Setup
-1. Download `vosk-model-small-en-in` from https://alphacephei.com/vosk/models
-2. Place the extracted folder as `app/src/main/assets/model` or push to `filesDir/model` at runtime
-3. Set your backend token in `local.properties`:
-   ```properties
-   hermes.token=YOUR_TOKEN_HERE
-   ```
-4. Build & install
+1. Add a GitHub Actions secret named `HERMES_TOKEN` (Settings > Secrets and variables > Actions). It must match `TOKEN` in the Termux bridge (`~/hermes_bridge.py`).
+2. Push to `master` (or run the workflow manually). The workflow downloads `vosk-model-small-en-in` from https://alphacephei.com/vosk/models into `app/src/main/assets/model`, builds a debug APK and publishes it to the `latest-build` release.
+3. Install `app-debug.apk` from the release, grant the microphone permission and tap Start Listening.
+4. Keep the bridge running in Termux: `python3 ~/hermes_bridge.py &`
 
-## Build
+## Local build
+Place the extracted model folder at `app/src/main/assets/model`, then:
 ```bash
-./gradlew assembleRelease
+HERMES_TOKEN=your-token gradle assembleDebug
 ```
-
-APK appears at `app/build/outputs/apk/release/app-release.apk`.
+APK: `app/build/outputs/apk/debug/app-debug.apk`
 
 ## GitHub Actions
-This repo includes `.github/workflows/build.yml` that builds a signed debug APK on every push and attaches it to a GitHub Release tagged `latest-build`.
+`.github/workflows/build.yml` builds a debug-signed APK on every push and attaches it to a GitHub Release tagged `latest-build`.
 
 ## Permissions
 - `RECORD_AUDIO`

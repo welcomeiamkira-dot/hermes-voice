@@ -1,38 +1,57 @@
 package com.example.hermesvoice
 
+import android.app.Notification
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.app.PendingIntent
 import android.app.Service
 import android.content.Intent
-import android.content.ServiceInfo
+import android.content.pm.ServiceInfo
 import android.media.AudioFormat
 import android.media.AudioRecord
 import android.media.MediaRecorder
 import android.os.Build
+import android.os.Bundle
+import android.os.Handler
 import android.os.IBinder
+import android.os.Looper
 import android.speech.RecognitionListener
 import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
 import android.util.Log
 import androidx.core.app.NotificationCompat
-import okhttp3.MediaType
+import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
-import okhttp3.RequestBody
+import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONObject
 import org.vosk.Model
 import org.vosk.Recognizer
 import java.io.File
 import java.io.IOException
-import java.util.*
 import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 
+/**
+ * Flow: offline wake word ("hermes") with Vosk -> say "haan bolo" -> Android
+ * SpeechRecognizer hears the request -> POST to the Termux bridge -> speak the
+ * answer -> back to wake word.
+ */
 class VoiceService : Service() {
 
     private val executor = Executors.newSingleThreadExecutor()
-    private var wakeRecognizer: Recognizer? = null
-    private var speechRecognizer: SpeechRecognizer? = null
+    private val main = Handler(Looper.getMainLooper())
+    private val client = OkHttpClient.Builder()
+        .connectTimeout(10, TimeUnit.SECONDS)
+        .readTimeout(120, TimeUnit.SECONDS)
+        .build()
+
+    private var model: Model? = null
     private var tts: HermesTts? = null
-    private var recording: AudioRecord? = null
-    private var listening = false
+    private var speechRecognizer: SpeechRecognizer? = null
+
+    @Volatile private var listening = false
+    @Volatile private var active = false
 
     override fun onCreate() {
         super.onCreate()
@@ -41,14 +60,29 @@ class VoiceService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            startForeground(NOTIF_ID, buildNotification(), ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE)
-        } else {
-            startForeground(NOTIF_ID, buildNotification())
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                startForeground(
+                    NOTIF_ID,
+                    buildNotification(),
+                    ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
+                )
+            } else {
+                startForeground(NOTIF_ID, buildNotification())
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "startForeground failed (microphone permission?)", e)
+            stopSelf()
+            return START_NOT_STICKY
         }
-        when (intent?.action) {
-            ACTION_START -> ensureModelAndListen()
-            ACTION_STOP -> stopListening()
+
+        if (intent?.action == ACTION_STOP) {
+            stopListening()
+            stopForeground(STOP_FOREGROUND_REMOVE)
+            stopSelf()
+        } else {
+            isRunning = true
+            startWakeWord()
         }
         return START_STICKY
     }
@@ -59,169 +93,216 @@ class VoiceService : Service() {
         super.onDestroy()
         stopListening()
         tts?.shutdown()
+        tts = null
+        executor.execute {
+            model?.close()
+            model = null
+        }
+        executor.shutdown()
     }
 
-    private fun ensureModelAndListen() {
-        isRunning = true
-        executor.execute {
-            try {
-                val modelDir = File(filesDir, "model")
-                if (!modelDir.exists() || !File(modelDir, "am/final.mdl").exists()) {
-                    copyModelFromAssets(modelDir)
-                }
-                wakeRecognizer = Model(modelDir.absolutePath).let { Recognizer(it, 16000.0f) }
-                startWakeWordLoop()
-            } catch (e: Exception) {
-                Log.e(TAG, "Model init failed", e)
+    // ---------- wake word ----------
+
+    private fun startWakeWord() {
+        if (active) return
+        active = true
+        executor.execute { runWakeLoop() }
+    }
+
+    private fun loadModel(): Model {
+        model?.let { return it }
+        val dir = File(filesDir, "model")
+        if (!File(dir, "am/final.mdl").exists()) {
+            dir.deleteRecursively()
+            if (assets.list("model").isNullOrEmpty()) {
+                throw IOException("Vosk model missing in the APK (assets/model)")
+            }
+            copyAssetDir("model", dir)
+        }
+        val loaded = Model(dir.absolutePath)
+        model = loaded
+        return loaded
+    }
+
+    private fun copyAssetDir(assetPath: String, dest: File) {
+        val children = assets.list(assetPath)
+        if (children == null || children.isEmpty()) {
+            dest.parentFile?.mkdirs()
+            assets.open(assetPath).use { input ->
+                dest.outputStream().use { output -> input.copyTo(output) }
+            }
+        } else {
+            dest.mkdirs()
+            for (child in children) {
+                copyAssetDir("$assetPath/$child", File(dest, child))
             }
         }
     }
 
-    private fun copyModelFromAssets(destDir: File) {
-        // In production, download the model or ship it as an expansion file.
-        // This is a placeholder that throws until the model is present.
-        throw IOException("Vosk model not found at ${destDir.absolutePath}. Place 'model' folder there.")
+    private fun isWakeWord(text: String): Boolean {
+        if (text.isBlank()) return false
+        val normalized = text.lowercase().trim()
+        if (normalized.contains("her mes") || normalized.contains("her mis")) return true
+        return normalized.split(" ").any { it in WAKE_WORDS }
     }
 
-    private fun startWakeWordLoop() {
-        listening = true
-        executor.execute {
-            val bufferSize = AudioRecord.getMinBufferSize(
-                16000,
+    private fun runWakeLoop() {
+        var audio: AudioRecord? = null
+        var recognizer: Recognizer? = null
+        var detected = false
+        try {
+            val m = loadModel()
+            recognizer = Recognizer(m, SAMPLE_RATE.toFloat())
+
+            val minBuffer = AudioRecord.getMinBufferSize(
+                SAMPLE_RATE,
                 AudioFormat.CHANNEL_IN_MONO,
                 AudioFormat.ENCODING_PCM_16BIT
             )
-            recording = AudioRecord(
+            val bufferSize = maxOf(minBuffer, 4096)
+            audio = AudioRecord(
                 MediaRecorder.AudioSource.VOICE_RECOGNITION,
-                16000,
+                SAMPLE_RATE,
                 AudioFormat.CHANNEL_IN_MONO,
                 AudioFormat.ENCODING_PCM_16BIT,
                 bufferSize
             )
-            val buffer = ByteArray(bufferSize)
-            recording?.startRecording()
+            audio.startRecording()
+            listening = true
 
-            while (listening && wakeRecognizer != null) {
-                val read = recording?.read(buffer, 0, buffer.size) ?: -1
-                if (read > 0) {
-                    wakeRecognizer?.acceptWaveForm(buffer, read)
-                    val partial = JSONObject(wakeRecognizer?.partialResult ?: "{}")
-                        .optString("partial", "").lowercase(Locale.getDefault())
-                    if (partial.contains("hermes")) {
-                        onWakeWordDetected()
-                        break
-                    }
+            val buffer = ByteArray(bufferSize)
+            while (listening) {
+                val read = audio.read(buffer, 0, buffer.size)
+                if (read < 0) break
+                if (read == 0) continue
+                val isFinal = recognizer.acceptWaveForm(buffer, read)
+                val json = JSONObject(if (isFinal) recognizer.result else recognizer.partialResult)
+                val text = json.optString("text", json.optString("partial", ""))
+                if (isWakeWord(text)) {
+                    detected = true
+                    break
                 }
             }
+        } catch (e: Exception) {
+            Log.e(TAG, "Wake word loop failed", e)
+            active = false
+            main.post { tts?.speak("Wake word shuru nahi hua. Model check karo.") }
+        } finally {
+            listening = false
+            try {
+                audio?.stop()
+            } catch (e: Exception) {
+                // ignore
+            }
+            audio?.release()
+            recognizer?.close()
+        }
+
+        if (detected) {
+            main.post { onWakeWord() }
         }
     }
 
-    private fun onWakeWordDetected() {
-        listening = false
-        recording?.stop()
-        recording?.release()
-        recording = null
+    // ---------- listen to the request ----------
 
-        tts?.speak("haan bolo") {
-            startSpeechRecognition()
-        }
+    private fun onWakeWord() {
+        tts?.speak("haan bolo") { startSpeechRecognition() }
     }
 
     private fun startSpeechRecognition() {
-        if (SpeechRecognizer.isRecognitionAvailable(this)) {
-            speechRecognizer = SpeechRecognizer.createSpeechRecognizer(this)
-            speechRecognizer?.setRecognitionListener(object : RecognitionListener {
-                override fun onReadyForSpeech(params: Bundle?) {}
-                override fun onBeginningOfSpeech() {}
-                override fun onRmsChanged(rmsdB: Float) {}
-                override fun onBufferReceived(buffer: ByteArray?) {}
-                override fun onPartialResults(bundle: Bundle?) {}
-                override fun onEvent(eventType: Int, params: Bundle?) {}
-
-                override fun onResults(results: Bundle) {
-                    val matches = results.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
-                    val text = matches?.firstOrNull()?.trim() ?: ""
-                    if (text.isNotEmpty()) {
-                        postMessageAndSpeak(text)
-                    } else {
-                        // Restart wake word listening if nothing heard
-                        ensureModelAndListen()
-                    }
-                }
-
-                override fun onError(error: Int) {
-                    Log.w(TAG, "SpeechRecognizer error: $error")
-                    ensureModelAndListen()
-                }
-            })
-
-            val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
-                putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
-                putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
-                putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
-            }
-            speechRecognizer?.startListening(intent)
-        } else {
-            tts?.speak("Speech recognition not available")
-            ensureModelAndListen()
+        if (!SpeechRecognizer.isRecognitionAvailable(this)) {
+            tts?.speak("Speech recognition available nahi hai") { resumeWake() }
+            return
         }
+        speechRecognizer?.destroy()
+        val recognizer = SpeechRecognizer.createSpeechRecognizer(this)
+        speechRecognizer = recognizer
+        recognizer.setRecognitionListener(object : RecognitionListener {
+            override fun onReadyForSpeech(params: Bundle?) {}
+            override fun onBeginningOfSpeech() {}
+            override fun onRmsChanged(rmsdB: Float) {}
+            override fun onBufferReceived(buffer: ByteArray?) {}
+            override fun onEndOfSpeech() {}
+            override fun onPartialResults(partialResults: Bundle?) {}
+            override fun onEvent(eventType: Int, params: Bundle?) {}
+
+            override fun onResults(results: Bundle?) {
+                val text = results
+                    ?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
+                    ?.firstOrNull()
+                    ?.trim()
+                    .orEmpty()
+                if (text.isEmpty()) resumeWake() else askHermes(text)
+            }
+
+            override fun onError(error: Int) {
+                Log.w(TAG, "SpeechRecognizer error: $error")
+                resumeWake()
+            }
+        })
+
+        val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+            putExtra(
+                RecognizerIntent.EXTRA_LANGUAGE_MODEL,
+                RecognizerIntent.LANGUAGE_MODEL_FREE_FORM
+            )
+            putExtra(RecognizerIntent.EXTRA_LANGUAGE, "en-IN")
+            putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
+        }
+        recognizer.startListening(intent)
     }
 
-    private fun postMessageAndSpeak(message: String) {
+    // ---------- talk to Hermes (Termux bridge) ----------
+
+    private fun askHermes(message: String) {
         executor.execute {
+            var answer = ""
             try {
                 val body = JSONObject().put("message", message).toString()
-                val request = okhttp3.Request.Builder()
-                    .url("http://127.0.0.1:8765/")
+                    .toRequestBody("application/json".toMediaType())
+                val request = Request.Builder()
+                    .url(BRIDGE_URL)
                     .addHeader("X-Token", BuildConfig.HERMES_TOKEN)
-                    .post(okhttp3.RequestBody.create(okhttp3.MediaType.parse("application/json"), body))
+                    .post(body)
                     .build()
-
-                val client = okhttp3.OkHttpClient()
                 client.newCall(request).execute().use { response ->
-                    if (!response.isSuccessful) {
-                        tts?.speak("Server error")
-                        return@execute
-                    }
-                    val resp = JSONObject(response.body!!.string())
-                    val answer = resp.optString("answer", "")
-                    if (answer.isNotEmpty()) {
-                        tts?.speak(answer)
+                    answer = when {
+                        response.code == 403 -> "Token match nahi hua"
+                        !response.isSuccessful -> "Server error " + response.code
+                        else -> JSONObject(response.body?.string() ?: "{}").optString("answer", "")
                     }
                 }
             } catch (e: Exception) {
-                Log.e(TAG, "Network error", e)
-                tts?.speak("Network error")
-            } finally {
-                // Resume wake word listening after answering
-                ensureModelAndListen()
+                Log.e(TAG, "Bridge call failed", e)
+                answer = "Bridge se connect nahi hua. Termux me bridge chalu karo."
             }
+            if (answer.isBlank()) answer = "Mujhe jawab nahi mila."
+            main.post { tts?.speak(answer) { resumeWake() } }
         }
     }
 
-    private var stopped = false
+    private fun resumeWake() {
+        main.post {
+            speechRecognizer?.destroy()
+            speechRecognizer = null
+            active = false
+            if (isRunning) startWakeWord()
+        }
+    }
+
+    // ---------- stop ----------
 
     private fun stopListening() {
-        if (stopped) return
-        stopped = true
         isRunning = false
         listening = false
-        recording?.stop()
-        recording?.release()
-        recording = null
-        wakeRecognizer?.close()
-        wakeRecognizer = null
-        speechRecognizer?.cancel()
-        speechRecognizer?.destroy()
-        speechRecognizer = null
-        try {
-            executor.shutdownNow()
-        } catch (e: Exception) {
-            // ignore
+        active = false
+        main.post {
+            speechRecognizer?.destroy()
+            speechRecognizer = null
         }
-        stopForeground(STOP_FOREGROUND_REMOVE)
-        stopSelf()
     }
+
+    // ---------- notification ----------
 
     private fun buildNotification(): Notification {
         val launchIntent = Intent(this, MainActivity::class.java)
@@ -257,6 +338,16 @@ class VoiceService : Service() {
         const val CHANNEL_ID = "hermes-voice-channel"
         const val NOTIF_ID = 1
         const val TAG = "HermesVoice"
+        const val SAMPLE_RATE = 16000
+        const val BRIDGE_URL = "http://127.0.0.1:8765/"
+
+        // The small model may spell the name in different ways
+        private val WAKE_WORDS = setOf(
+            "hermes", "hermis", "harmes", "hermez", "hermas",
+            "harmesh", "hermesh", "hermies", "hermess"
+        )
+
+        @Volatile
         var isRunning = false
             private set
     }

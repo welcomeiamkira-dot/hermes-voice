@@ -3,6 +3,10 @@ name: Build and Release APK
 on:
   push:
     branches: [ main, master ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
 
 jobs:
   build:
@@ -14,48 +18,46 @@ jobs:
         with:
           distribution: temurin
           java-version: 17
-          cache: gradle
 
-      - name: Setup Android SDK
+      - uses: android-actions/setup-android@v3
+
+      # AGP 8.5 needs Gradle 8.7 or newer
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: 8.9
+
+      - name: Download Vosk model into assets
         run: |
-          sudo apt-get update -y
-          sudo apt-get install -y wget unzip
-          mkdir -p "$HOME/android-sdk/cmdline-tools"
-          cd "$HOME/android-sdk/cmdline-tools"
-          wget -q https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip -O tools.zip
-          unzip -q tools.zip
-          mv cmdline-tools latest
-          echo "ANDROID_HOME=$HOME/android-sdk" >> $GITHUB_ENV
-          echo "$HOME/android-sdk/cmdline-tools/latest/bin" >> $GITHUB_PATH
-          echo "$HOME/android-sdk/platform-tools" >> $GITHUB_PATH
-          yes | sdkmanager --licenses || true
-          sdkmanager "platform-tools" "platforms;android-34" "build-tools;34.0.0"
+          set -e
+          curl -fsSL -o model.zip https://alphacephei.com/vosk/models/vosk-model-small-en-in-0.4.zip
+          unzip -q model.zip -d model-unzipped
+          mkdir -p app/src/main/assets
+          rm -rf app/src/main/assets/model
+          mv "$(find model-unzipped -mindepth 1 -maxdepth 1 -type d | head -1)" app/src/main/assets/model
+          ls app/src/main/assets/model
+          test -f app/src/main/assets/model/am/final.mdl
 
-      - name: Setup Gradle 8.5
-        run: |
-          curl -sL https://services.gradle.org/distributions/gradle-8.5-bin.zip -o gradle.zip
-          unzip -q gradle.zip
-          echo "$PWD/gradle-8.5/bin" >> $GITHUB_PATH
-
-      - name: Build Release APK
-        run: gradle assembleRelease
+      - name: Build debug APK
+        run: gradle assembleDebug --stacktrace
         env:
           HERMES_TOKEN: ${{ secrets.HERMES_TOKEN || 'CHANGE_ME' }}
 
-      - name: Upload APK to GitHub Release
+      - uses: actions/upload-artifact@v4
+        with:
+          name: debug-apk
+          path: app/build/outputs/apk/debug/app-debug.apk
+
+      - name: Publish APK to GitHub Release
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           TAG="latest-build"
-          APK_PATH="app/build/outputs/apk/release/app-release.apk"
-
+          APK_PATH="app/build/outputs/apk/debug/app-debug.apk"
           if gh release view "$TAG" >/dev/null 2>&1; then
-            echo "Release exists, uploading APK..."
             gh release upload "$TAG" "$APK_PATH" --clobber
           else
-            echo "Creating new release..."
             gh release create "$TAG" "$APK_PATH" \
               --target "$GITHUB_SHA" \
               --title "latest-build" \
-              --notes "Auto-built APK from $GITHUB_SHA"
+              --notes "Auto-built debug APK"
           fi

@@ -20,7 +20,7 @@ android {
         }
 
         // Backend token — override via HERMES_TOKEN env var (CI) or local.properties
-        val hermesToken = System.getenv("HERMES_TOKEN") ?: "CHANGE_ME"
+        val hermesToken = System.getenv("HERMES_TOKEN")?.takeIf { it.isNotBlank() } ?: "CHANGE_ME"
         buildConfigField("String", "HERMES_TOKEN", "\"$hermesToken\"")
     }
 
@@ -57,7 +57,8 @@ dependencies {
     implementation("androidx.constraintlayout:constraintlayout:2.1.4")
 
     // Vosk offline speech recognition
-    implementation("com.github.vosk:android:0.3.45")
+    implementation("net.java.dev.jna:jna:5.13.0@aar")
+    implementation("com.alphacephei:vosk-android:0.3.47")
 
     // OkHttp for HTTP calls
     implementation("com.squareup.okhttp3:okhttp:4.12.0")

@@ -75,7 +75,9 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun startVoiceService() {
-        val intent = Intent(this, VoiceService::class.java)
+        val intent = Intent(this, VoiceService::class.java).apply {
+            action = VoiceService.ACTION_START
+        }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             startForegroundService(intent)
         } else {
