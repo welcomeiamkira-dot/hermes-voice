@@ -19,8 +19,9 @@ android {
             useSupportLibrary = true
         }
 
-        // Backend token — override in local.properties or CI secrets
-        buildConfigField("String", "HERMES_TOKEN", "\"CHANGE_ME\"")
+        // Backend token — override via HERMES_TOKEN env var (CI) or local.properties
+        val hermesToken = System.getenv("HERMES_TOKEN") ?: "CHANGE_ME"
+        buildConfigField("String", "HERMES_TOKEN", "\"$hermesToken\"")
     }
 
     buildTypes {
