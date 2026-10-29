@@ -4,5 +4,5 @@
     <string name="notification_channel_name">Hermes Listening</string>
     <string name="notification_channel_desc">Always-on wake-word detection &amp; voice assistant</string>
     <string name="notification_title">Hermes is listening</string>
-    <string name="notification_text">Say \"hermes\" to activate</string>
+    <string name="notification_text">Say Hermes, Jarvis or Computer</string>
 </resources>

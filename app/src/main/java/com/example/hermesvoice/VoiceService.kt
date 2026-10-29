@@ -24,6 +24,7 @@ import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
+import org.json.JSONArray
 import org.json.JSONObject
 import org.vosk.Model
 import org.vosk.Recognizer
@@ -167,6 +168,7 @@ class VoiceService : Service() {
         var audio: AudioRecord? = null
         var recognizer: Recognizer? = null
         var detected = false
+        var stopRequested = false
         try {
             status = "Model load ho raha hai (pehli baar 10-20 sec)..."
             val m = loadModel()
@@ -187,7 +189,7 @@ class VoiceService : Service() {
             )
             audio.startRecording()
             listening = true
-            status = "Sun raha hoon... \"Hermes\" bolo"
+            status = "Sun raha hoon... Hermes / Jarvis / Computer bolo (band: Stop)"
 
             val buffer = ByteArray(bufferSize)
             var lastText = ""
@@ -201,6 +203,10 @@ class VoiceService : Service() {
                 if (text.isNotBlank() && text != lastText) {
                     lastText = text
                     status = "Suna: $text"
+                }
+                if (text.split(" ").contains("stop")) {
+                    stopRequested = true
+                    break
                 }
                 if (isWakeWord(text)) {
                     detected = true
@@ -223,7 +229,14 @@ class VoiceService : Service() {
             recognizer?.close()
         }
 
-        if (detected) {
+        if (stopRequested) {
+            status = "Stop suna. Band ho gaya."
+            main.post {
+                stopListening()
+                stopForeground(STOP_FOREGROUND_REMOVE)
+                stopSelf()
+            }
+        } else if (detected) {
             main.post { onWakeWord() }
         }
     }
@@ -285,23 +298,35 @@ class VoiceService : Service() {
         executor.execute {
             var answer = ""
             try {
-                val body = JSONObject().put("message", message).toString()
+                val messages = JSONArray()
+                    .put(JSONObject().put("role", "system").put("content", VOICE_HINT))
+                    .put(JSONObject().put("role", "user").put("content", message))
+                val body = JSONObject()
+                    .put("model", "hermes-agent")
+                    .put("messages", messages)
+                    .toString()
                     .toRequestBody("application/json".toMediaType())
                 val request = Request.Builder()
-                    .url(BRIDGE_URL)
-                    .addHeader("X-Token", BuildConfig.HERMES_TOKEN)
+                    .url(API_URL)
+                    .addHeader("Authorization", "Bearer " + BuildConfig.HERMES_TOKEN)
+                    .addHeader("X-Hermes-Session-Id", SESSION_ID)
                     .post(body)
                     .build()
                 client.newCall(request).execute().use { response ->
                     answer = when {
-                        response.code == 403 -> "Token match nahi hua"
+                        response.code == 401 || response.code == 403 -> "Token match nahi hua"
                         !response.isSuccessful -> "Server error " + response.code
-                        else -> JSONObject(response.body?.string() ?: "{}").optString("answer", "")
+                        else -> JSONObject(response.body?.string() ?: "{}")
+                            .optJSONArray("choices")
+                            ?.optJSONObject(0)
+                            ?.optJSONObject("message")
+                            ?.optString("content", "")
+                            .orEmpty()
                     }
                 }
             } catch (e: Exception) {
-                Log.e(TAG, "Bridge call failed", e)
-                answer = "Bridge se connect nahi hua. Termux me bridge chalu karo."
+                Log.e(TAG, "Hermes API call failed", e)
+                answer = "Hermes se connect nahi hua. Termux me gateway chalu karo."
             }
             if (answer.isBlank()) answer = "Mujhe jawab nahi mila."
             status = "Jawab: $answer"
@@ -367,12 +392,18 @@ class VoiceService : Service() {
         const val NOTIF_ID = 1
         const val TAG = "HermesVoice"
         const val SAMPLE_RATE = 16000
-        const val BRIDGE_URL = "http://127.0.0.1:8765/"
+        const val API_URL = "http://127.0.0.1:8642/v1/chat/completions"
+        const val SESSION_ID = "voice"
+        const val VOICE_HINT =
+            "Your reply is read aloud by a speaker. Answer in 1 to 3 short sentences. " +
+            "No markdown, no lists, no emojis."
 
         // The small model may spell the name in different ways
+        // (Vosk does not know "hermes" well, so a few common words work as wake words too)
         private val WAKE_WORDS = setOf(
             "hermes", "hermis", "harmes", "hermez", "hermas",
-            "harmesh", "hermesh", "hermies", "hermess"
+            "harmesh", "hermesh", "hermies", "hermess",
+            "jarvis", "computer"
         )
 
         @Volatile

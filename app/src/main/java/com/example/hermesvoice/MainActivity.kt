@@ -25,7 +25,12 @@ class MainActivity : AppCompatActivity() {
     private val handler = Handler(Looper.getMainLooper())
     private val poll = object : Runnable {
         override fun run() {
-            tvHeard.text = if (VoiceService.isRunning) VoiceService.status else ""
+            val running = VoiceService.isRunning
+            if (running != serviceRunning) {
+                serviceRunning = running
+                updateUi()
+            }
+            tvHeard.text = if (running) VoiceService.status else VoiceService.status.takeIf { it.startsWith("Stop") } ?: ""
             handler.postDelayed(this, 500)
         }
     }

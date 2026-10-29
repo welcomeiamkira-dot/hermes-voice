@@ -10,10 +10,10 @@ Android foreground service that listens for the wake word **"hermes"** offline u
 - Auto-starts after boot
 
 ## Setup
-1. Add a GitHub Actions secret named `HERMES_TOKEN` (Settings > Secrets and variables > Actions). It must match `TOKEN` in the Termux bridge (`~/hermes_bridge.py`).
-2. Push to `master` (or run the workflow manually). The workflow downloads `vosk-model-small-en-in` from https://alphacephei.com/vosk/models into `app/src/main/assets/model`, builds a debug APK and publishes it to the `latest-build` release.
-3. Install `app-debug.apk` from the release, grant the microphone permission and tap Start Listening.
-4. Keep the bridge running in Termux: `python3 ~/hermes_bridge.py &`
+1. In Termux, enable the Hermes API server: add `API_SERVER_ENABLED=true` and `API_SERVER_KEY=<key>` to `~/.hermes/.env`, install `aiohttp` into the Hermes venv, then restart the gateway: `hermes -p default gateway restart`. The app calls `http://127.0.0.1:8642/v1/chat/completions` with `Authorization: Bearer <key>` and `X-Hermes-Session-Id: voice`.
+2. Add a GitHub Actions secret named `HERMES_TOKEN` with the same value as `API_SERVER_KEY` (Settings > Secrets and variables > Actions).
+3. Push to `master` (or run the workflow manually). It downloads `vosk-model-small-en-in`, builds a debug APK and publishes it to the `latest-build` release.
+4. Install `app-debug.apk`, grant the microphone permission and tap Start Listening. Say "hermes", "jarvis" or "computer" to wake it, and "stop" to turn it off.
 
 ## Local build
 Place the extracted model folder at `app/src/main/assets/model`, then:
